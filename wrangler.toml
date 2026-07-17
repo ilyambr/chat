@@ -1,8 +1,10 @@
 name = "bams-chat-of-the-day"
 compatibility_date = "2024-01-01"
+main = "worker.js"
 
 [assets]
 directory = "./dist"
+binding = "ASSETS"
 
 [[routes]]
 pattern = "ilyambr.com/bams/chat*"

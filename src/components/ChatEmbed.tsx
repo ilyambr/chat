@@ -37,25 +37,32 @@ const fetchWithProxy = async (target: string): Promise<string> => {
     } catch (e) {
       console.warn('Vite server proxy failed, trying public CORS proxies...', e);
     }
-  }
 
-  // Try corsproxy.io first
-  try {
-    const res = await fetch(`https://corsproxy.io/?${target}`);
+    try {
+      const res = await fetch(`https://corsproxy.io/?${target}`);
+      if (res.ok) {
+        return await res.text();
+      }
+    } catch (e) {
+      console.warn('corsproxy.io failed, trying allorigins...', e);
+    }
+    
+    const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`);
     if (res.ok) {
       return await res.text();
     }
-  } catch (e) {
-    console.warn('corsproxy.io failed, trying allorigins...', e);
+    
+    throw new Error('Could not contact proxy servers. Please try again.');
   }
-  
-  // Try allorigins as fallback
-  const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(target)}`);
+
+  // Production: use our own Cloudflare Worker API proxy
+  const proxyUrl = `/bams/chat/api-proxy?url=${encodeURIComponent(target)}`;
+  const res = await fetch(proxyUrl);
   if (res.ok) {
     return await res.text();
   }
   
-  throw new Error('Could not contact proxy servers. Please try again.');
+  throw new Error('Could not contact Cloudflare proxy. Please try again.');
 };
 
 export const ChatEmbed: React.FC<ChatEmbedProps> = ({ type, channel }) => {

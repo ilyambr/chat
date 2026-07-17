@@ -27,33 +27,63 @@ export interface YoutubeChatMessage {
   color: string;
 }
 
-export const resolveYoutubeChannelToVideoId = async (handle: string): Promise<string> => {
-  const handleName = handle.trim().replace(/^@/, '');
-  
-  let html = '';
+const fetchWithProxy = async (targetUrl: string, options?: RequestInit): Promise<Response> => {
   if (import.meta.env.DEV) {
-    try {
-      const res = await fetch(`/youtube-channel/@${handleName}/live`);
-      if (res.ok) html = await res.text();
-    } catch (e) {
-      console.warn('Local proxy failed resolving handle, trying public proxies...', e);
+    let localUrl = '';
+    if (targetUrl.includes('/live_chat/get_live_chat')) {
+      const apiKey = new URL(targetUrl).searchParams.get('key');
+      localUrl = `/youtubei-api/live_chat/get_live_chat?key=${apiKey}`;
+    } else if (targetUrl.includes('/live_chat?v=')) {
+      const videoId = new URL(targetUrl).searchParams.get('v');
+      localUrl = `/youtube-live-chat?v=${videoId}`;
+    } else if (targetUrl.includes('youtube.com/@')) {
+      const handle = targetUrl.split('youtube.com/')[1];
+      localUrl = `/youtube-channel/${handle}`;
     }
+
+    if (localUrl) {
+      try {
+        const res = await fetch(localUrl, options);
+        if (res.ok) return res;
+      } catch (e) {
+        console.warn(`Local proxy dev failed for ${targetUrl}, trying public fallback...`, e);
+      }
+    }
+
+    try {
+      const res = await fetch(`https://corsproxy.io/?${targetUrl}`, options);
+      if (res.ok) return res;
+    } catch (e) {
+      console.warn('corsproxy.io failed, trying allorigins...', e);
+    }
+
+    if (!options || options.method === 'GET') {
+      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`);
+      if (res.ok) return res;
+    }
+
+    throw new Error(`Failed to fetch in dev: ${targetUrl}`);
   }
 
-  if (!html) {
-    const targetUrl = `https://www.youtube.com/@${handleName}/live`;
-    try {
-      const res = await fetch(`https://corsproxy.io/?${targetUrl}`);
-      if (res.ok) html = await res.text();
-    } catch (e) {
-      console.warn('corsproxy.io failed resolving handle, trying allorigins...', e);
-    }
-    
-    if (!html) {
-      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`);
-      if (!res.ok) throw new Error('Could not reach YouTube.');
-      html = await res.text();
-    }
+  // Production: use our own Cloudflare Worker API proxy
+  const proxyUrl = `/bams/chat/api-proxy?url=${encodeURIComponent(targetUrl)}`;
+  const res = await fetch(proxyUrl, options);
+  if (res.ok) {
+    return res;
+  }
+  throw new Error(`Failed to fetch via Cloudflare proxy: ${targetUrl}`);
+};
+
+export const resolveYoutubeChannelToVideoId = async (handle: string): Promise<string> => {
+  const handleName = handle.trim().replace(/^@/, '');
+  const targetUrl = `https://www.youtube.com/@${handleName}/live`;
+  
+  let html = '';
+  try {
+    const res = await fetchWithProxy(targetUrl);
+    html = await res.text();
+  } catch (e) {
+    throw new Error('No active live stream found for this channel. Make sure they are currently live on YouTube!');
   }
 
   const canonicalMatch = html.match(/<link rel="canonical" href="https:\/\/www\.youtube\.com\/watch\?v=([a-zA-Z0-9_-]{11})"/);
@@ -69,30 +99,14 @@ export const resolveYoutubeChannelToVideoId = async (handle: string): Promise<st
 };
 
 export const resolveInitialChatData = async (videoId: string) => {
+  const targetUrl = `https://www.youtube.com/live_chat?v=${videoId}`;
+  
   let html = '';
-  if (import.meta.env.DEV) {
-    try {
-      const res = await fetch(`/youtube-live-chat?v=${videoId}`);
-      if (res.ok) html = await res.text();
-    } catch (e) {
-      console.warn('Local proxy failed for initial chat, trying public proxies...', e);
-    }
-  }
-
-  if (!html) {
-    const targetUrl = `https://www.youtube.com/live_chat?v=${videoId}`;
-    try {
-      const res = await fetch(`https://corsproxy.io/?${targetUrl}`);
-      if (res.ok) html = await res.text();
-    } catch (e) {
-      console.warn('corsproxy.io failed for initial chat, trying allorigins...', e);
-    }
-    
-    if (!html) {
-      const res = await fetch(`https://api.allorigins.win/raw?url=${encodeURIComponent(targetUrl)}`);
-      if (!res.ok) throw new Error('Failed to load initial YouTube chat page.');
-      html = await res.text();
-    }
+  try {
+    const res = await fetchWithProxy(targetUrl);
+    html = await res.text();
+  } catch (e) {
+    throw new Error('Failed to load initial YouTube chat page.');
   }
   
   const apiKeyMatch = html.match(/"INNERTUBE_API_KEY":"([^"]+)"/) || html.match(/"apiKey":"([^"]+)"/);
@@ -162,21 +176,8 @@ export const pollYoutubeChat = async (apiKey: string, continuationToken: string,
     headers['X-Goog-Visitor-Id'] = visitorData;
   }
 
-  if (import.meta.env.DEV) {
-    try {
-      const res = await fetch(`/youtubei-api/live_chat/get_live_chat?key=${apiKey}`, {
-        method: 'POST',
-        headers: headers,
-        body: JSON.stringify(requestBody)
-      });
-      if (res.ok) return await res.json();
-    } catch (e) {
-      console.warn('Local API proxy POST failed, trying public corsproxy.io...', e);
-    }
-  }
-
   const targetUrl = `https://www.youtube.com/youtubei/v1/live_chat/get_live_chat?key=${apiKey}`;
-  const res = await fetch(`https://corsproxy.io/?${targetUrl}`, {
+  const res = await fetchWithProxy(targetUrl, {
     method: 'POST',
     headers: headers,
     body: JSON.stringify(requestBody)
