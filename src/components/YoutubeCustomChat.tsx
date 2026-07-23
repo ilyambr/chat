@@ -26,6 +26,7 @@ export const YoutubeCustomChat: React.FC<YoutubeCustomChatProps> = ({ channel, s
   const seenIdsRef = useRef<Set<string>>(new Set());
   const maxMessagesRef = useRef(settings.maxMessages);
   const ignoredUsersRef = useRef<string[]>((settings.ignoredUsers || []).map(u => u.toLowerCase()));
+  const connectionStartTimeRef = useRef<number>(0);
 
   useEffect(() => { maxMessagesRef.current = settings.maxMessages; }, [settings.maxMessages]);
   useEffect(() => { ignoredUsersRef.current = (settings.ignoredUsers || []).map(u => u.toLowerCase()); }, [settings.ignoredUsers]);
@@ -57,7 +58,7 @@ export const YoutubeCustomChat: React.FC<YoutubeCustomChatProps> = ({ channel, s
   useEffect(() => {
     if (!cleanChannel) return;
 
-    const connectionStartTime = Date.now();
+    connectionStartTimeRef.current = 0;
 
     setMessages([]);
     seenIdsRef.current = new Set();
@@ -94,6 +95,7 @@ export const YoutubeCustomChat: React.FC<YoutubeCustomChatProps> = ({ channel, s
         setChannelStatus('connected');
 
         let currentContinuation = initialContinuation;
+        let isFirstPoll = true;
 
         const pollNext = async () => {
           if (!active) return;
@@ -104,27 +106,40 @@ export const YoutubeCustomChat: React.FC<YoutubeCustomChatProps> = ({ channel, s
             const { messages: newMsgs, nextContinuation, timeoutMs } = parseYoutubeActions(data);
             
             if (newMsgs.length > 0) {
-              const filteredNew = newMsgs.filter(m => {
-                if (seenIdsRef.current.has(m.id)) return false;
-                if (ignoredUsersRef.current.some(u => u === m.displayName.toLowerCase() || u === m.username.toLowerCase())) return false;
-                // Discard messages sent before we loaded the chat (with a 5-second buffer for clock drift)
-                if (m.timestampRaw < connectionStartTime - 5000) return false;
-                return true;
-              });
-              for (const msg of filteredNew) {
-                seenIdsRef.current.add(msg.id);
-                dripQueueRef.current.push(msg);
-              }
-              // Cap seen IDs so the set doesn't grow forever
-              if (seenIdsRef.current.size > 2000) {
-                const arr = Array.from(seenIdsRef.current);
-                seenIdsRef.current = new Set(arr.slice(arr.length - 1000));
-              }
-              // Kick off drip processor if not already running
-              if (!dripActiveRef.current && filteredNew.length > 0) {
-                processDripRef.current();
+              if (isFirstPoll) {
+                // Find the latest timestamp of the history messages to establish our local epoch
+                const maxTime = Math.max(...newMsgs.map(m => m.timestampRaw));
+                connectionStartTimeRef.current = maxTime;
+                
+                // Add all history messages to seenIdsRef
+                for (const msg of newMsgs) {
+                  seenIdsRef.current.add(msg.id);
+                }
+              } else {
+                const filteredNew = newMsgs.filter(m => {
+                  if (seenIdsRef.current.has(m.id)) return false;
+                  if (ignoredUsersRef.current.some(u => u === m.displayName.toLowerCase() || u === m.username.toLowerCase())) return false;
+                  // Discard any message that is historically older than or equal to the initial load threshold
+                  if (connectionStartTimeRef.current > 0 && m.timestampRaw <= connectionStartTimeRef.current) return false;
+                  return true;
+                });
+                for (const msg of filteredNew) {
+                  seenIdsRef.current.add(msg.id);
+                  dripQueueRef.current.push(msg);
+                }
+                // Cap seen IDs so the set doesn't grow forever
+                if (seenIdsRef.current.size > 2000) {
+                  const arr = Array.from(seenIdsRef.current);
+                  seenIdsRef.current = new Set(arr.slice(arr.length - 1000));
+                }
+                // Kick off drip processor if not already running
+                if (!dripActiveRef.current && filteredNew.length > 0) {
+                  processDripRef.current();
+                }
               }
             }
+
+            isFirstPoll = false;
 
             if (nextContinuation) {
               currentContinuation = nextContinuation;
